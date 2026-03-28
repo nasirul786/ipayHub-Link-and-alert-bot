@@ -5,6 +5,8 @@ const path = require('path');
 
 const bot = new Bot(process.env.BOT_TOKEN);
 const CHAT_ID = process.env.CHAT_ID;
+const MIN_AMOUNT = parseFloat(process.env.MIN_AMOUNT || '10');
+const FEE = parseFloat(process.env.FEE || '6');
 
 const CONFIG_FILE = path.join(__dirname, 'config.json');
 const COOKIE_FILE = path.join(__dirname, 'cookie.txt');
@@ -470,6 +472,10 @@ bot.on('message:text', async (ctx) => {
             const amount = parseFloat(amountStr);
             if (isNaN(amount) || amount <= 0) return ctx.reply("Please provide a valid amount! ✨ Example: $90");
             
+            if (amount < MIN_AMOUNT) {
+                return ctx.reply(`❌ Minimum amount is $${MIN_AMOUNT}. Please provide a higher amount.`);
+            }
+            
             const keyboard = new InlineKeyboard()
                 .text("CashApp", `method_cashapp_${amountStr}`)
                 .text("Stripe (ApplePay)", `method_stripe_${amountStr}`);
@@ -493,7 +499,13 @@ bot.callbackQuery(/^method_(cashapp|stripe)_(.+)$/, async (ctx) => {
     try {
         await ctx.editMessageText(`Generating your payment link... ⏳ (${method})`);
         
-        const data = await generateLink(amountStr, method);
+        // Calculate amount after deducting 6% fee (X / 1.06)
+        const totalAmount = parseFloat(amountStr);
+        const feePercentage = FEE / 100;
+        const baseAmount = totalAmount / (1 + feePercentage);
+        const finalAmount = baseAmount.toFixed(2);
+
+        const data = await generateLink(finalAmount, method);
         
         if (data.success && data.location) {
             let paymentLink = data.location;
