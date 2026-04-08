@@ -1,13 +1,12 @@
-# iPayHub Link & Alert Bot
+# iPayHub Link Bot
 
-A Telegram bot built with Node.js and Grammy to automate iPayHub operations natively. The bot generates payment links, fetches order statistics, auto-cancels pending orders efficiently, and natively polls for new success occurrences across multiple accounts.
+A Telegram bot built with Node.js and Grammy to automate iPayHub operations natively. The bot generates payment links, fetches order statistics, and auto-cancels pending orders across multiple accounts.
 
 ## Features
 - **Multi-Account Support**: Rotate between multiple iPayHub accounts automatically or select specific ones for management.
-- **Failover Link Generation**: Automatically retires links on alternative accounts if a session is expired until a working one is found.
-- **Native Operations**: Everything runs internally directly from Node.js (no external scripts needed).
+- **Failover Link Generation**: Automatically retries link generation on alternative accounts if a session is expired until a working one is found.
+- **Native Operations**: Everything runs internally directly from Node.js.
 - **Asynchronous Processing**: Background jobs like canceling pending orders run with randomized human-like delays (10-20s) without blocking the bot.
-- **Bot Alert Poller**: Background checks for new completed transactions every minute.
 - **Configurable Access**: Whitelist specific Telegram User IDs via `.env` and `config.json`.
 - **Fee Management**: Automatically calculates amounts to account for Payment Gateway fees (e.g., 6%).
 
@@ -27,7 +26,7 @@ A Telegram bot built with Node.js and Grammy to automate iPayHub operations nati
    ```env
    BOT_TOKEN=your_token
    BOT_PASSWORD=your_pin
-   CHAT_ID=your_alert_chat_id
+   CHAT_ID=your_chat_id
    MIN_AMOUNT=10
    FEE=6
    ```
