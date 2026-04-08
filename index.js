@@ -41,16 +41,16 @@ function getNextAccount() {
     const data = loadCookies();
     const keys = Object.keys(data.accounts);
     if (keys.length === 0) return null;
-    
+
     let index = data.last_used_index || 0;
     if (index >= keys.length) index = 0;
-    
+
     const accountKey = keys[index];
     const cookie = data.accounts[accountKey];
-    
+
     data.last_used_index = (index + 1) % keys.length;
     saveCookies(data);
-    
+
     return { id: accountKey, cookie };
 }
 
@@ -98,10 +98,11 @@ async function generateLink(amount, requestedMethod, account) {
     else if (requestedMethod === 'stripe-card') paymentMethod = 'stripe-card';
 
     let attempts = 0;
-    let currentCookie = account.cookie;
-
     while (attempts < 3) {
         attempts++;
+        const currentCookie = account.cookie;
+        console.log(`[Acc: ${account.id}] Attempt ${attempts} - CSRF: ${currentCsrfToken}`);
+
         const bodyParams = new URLSearchParams({
             custom_points: amount,
             payment_method: paymentMethod,
@@ -119,44 +120,69 @@ async function generateLink(amount, requestedMethod, account) {
                 method: 'POST',
                 headers: fetchHeaders,
                 body: bodyParams.toString(),
-                redirect: 'manual' 
+                redirect: 'manual'
             });
+
+            console.log(`[Acc: ${account.id}] POST Status: ${response.status}`);
 
             if (response.status >= 300 && response.status < 400) {
                 const loc = response.headers.get('location');
-                // Check if session expired or redirected to login
-                if (loc.includes('/login') || (loc.includes('/my-account/buy-points') && !loc.includes('/go/'))) {
-                     return { expired: true, accId: account.id };
+                console.log(`[Acc: ${account.id}] Redirected to: ${loc}`);
+
+                if (loc.includes('/login')) {
+                    console.log(`[Acc: ${account.id}] SESSION EXPIRED (Redirected to login)`);
+                    return { expired: true, accId: account.id };
                 }
-                return { success: true, location: loc, method: paymentMethod };
+
+                if (loc.includes('/my-account/buy-points') && !loc.includes('/go/')) {
+                    console.log(`[Acc: ${account.id}] BAD REDIRECT (Likely bad CSRF or same-page reload). Trying refresh.`);
+                    // Let the catch-all handle refresh
+                } else {
+                    return { success: true, location: loc, method: paymentMethod };
+                }
             } else if (response.status === 200) {
-                const text = await response.text();
-                // If text contains buy-points but no redirection, or "Login" text, it might be expired
-                if (text.includes('Login') || (!text.includes('TOP-') && text.includes('buy-points'))) {
-                    // This is simple check, buy-points page without redirect usually means session still there but POST failed or redirection happened to same page
-                }
+                console.log(`[Acc: ${account.id}] Got 200 OK (Expected redirect). Likely CSRF/Form issue.`);
+            }
 
-                const csrfMatch = text.match(/<meta name="csrf-token" content="([^"]+)">/);
-                if (csrfMatch) currentCsrfToken = csrfMatch[1];
+            // If we reach here, retry with a fresh token
+            console.log(`[Acc: ${account.id}] Refreshing CSRF token from GET /en/my-account/buy-points`);
+            const refreshRes = await fetch('https://app.ipayhub.net/en/my-account/buy-points', {
+                method: 'GET',
+                headers: getHeaders(currentCookie),
+                redirect: 'manual'
+            });
 
-                const setCookieHeader = response.headers.get('set-cookie');
-                if (setCookieHeader) {
-                    const cookieMatch = setCookieHeader.match(/([^=,\s]+)=([^;]+)/);
-                    if (cookieMatch) {
-                        const regex = new RegExp(`${cookieMatch[1]}=[^;]+`);
-                        if (regex.test(currentCookie)) currentCookie = currentCookie.replace(regex, `${cookieMatch[1]}=${cookieMatch[2]}`);
-                        else currentCookie += `; ${cookieMatch[1]}=${cookieMatch[2]}`;
-                        updateCookie(account.id, currentCookie);
-                    }
+            if (refreshRes.status >= 300 && refreshRes.status < 400) {
+                console.log(`[Acc: ${account.id}] Refresh GET failed with redirect to ${refreshRes.headers.get('location')}`);
+                return { expired: true, accId: account.id };
+            }
+
+            const text = await refreshRes.text();
+            const csrfMatch = text.match(/<meta name="csrf-token" content="([^"]+)">/);
+            if (csrfMatch) {
+                currentCsrfToken = csrfMatch[1];
+                console.log(`[Acc: ${account.id}] New CSRF Token: ${currentCsrfToken}`);
+            }
+
+            const setCookieHeader = refreshRes.headers.get('set-cookie');
+            if (setCookieHeader) {
+                const cookieMatch = setCookieHeader.match(/([^=,\s]+)=([^;]+)/);
+                if (cookieMatch) {
+                    const regex = new RegExp(`${cookieMatch[1]}=[^;]+`);
+                    let updatedCookie = currentCookie;
+                    if (regex.test(updatedCookie)) updatedCookie = updatedCookie.replace(regex, `${cookieMatch[1]}=${cookieMatch[2]}`);
+                    else updatedCookie += `; ${cookieMatch[1]}=${cookieMatch[2]}`;
+                    account.cookie = updatedCookie;
+                    console.log(`[Acc: ${account.id}] Cookies updated after refresh.`);
+                    updateCookie(account.id, updatedCookie);
                 }
-                if (attempts >= 3) return { error: 'Failed after 3 attempts' };
-            } else {
-                return { error: `HTTP ${response.status}` };
             }
         } catch (err) {
+            console.error(`[Acc: ${account.id}] Error: ${err.message}`);
             return { error: err.message };
         }
     }
+    return { error: 'Failed' };
 }
 
 async function getStatsForAccount(accId) {
@@ -234,8 +260,8 @@ async function cancelOrdersForAccount(ctx, accId, msgId) {
         let canceledCount = 0;
         for (let i = 0; i < pendingIds.length; i++) {
             const id = pendingIds[i];
-            await ctx.api.editMessageText(ctx.chat.id, msgId, `🛠 Account ${accId}: Canceling ${i+1}/${pendingIds.length} orders...`);
-            
+            await ctx.api.editMessageText(ctx.chat.id, msgId, `🛠 Account ${accId}: Canceling ${i + 1}/${pendingIds.length} orders...`);
+
             let success = false;
             let currentUrl = `https://app.ipayhub.net/my-account/buy-points/cancel/${id}`;
             for (let r = 0; r < 3; r++) {
@@ -287,7 +313,7 @@ bot.callbackQuery('authenticate', async (ctx) => {
 bot.command('stats', async (ctx) => {
     const config = loadConfig();
     if (!config.allowed_users.includes(ctx.from.id)) return ctx.reply("You are not authenticated! 🚫");
-    
+
     const cookies = loadCookies();
     const keys = Object.keys(cookies.accounts);
     if (keys.length === 0) return ctx.reply("No accounts found.");
@@ -322,7 +348,7 @@ bot.callbackQuery(/^stats_acc_(.+)$/, async (ctx) => {
 bot.command('cancel_pending', async (ctx) => {
     const config = loadConfig();
     if (!config.allowed_users.includes(ctx.from.id)) return ctx.reply("You are not authenticated! 🚫");
-    
+
     if (cancelInProgress) return ctx.reply("⚠️ Previous cancel in progress. Please wait.");
 
     const cookies = loadCookies();
@@ -340,11 +366,11 @@ bot.command('cancel_pending', async (ctx) => {
 bot.callbackQuery(/^cancel_acc_(.+)$/, async (ctx) => {
     const accId = ctx.match[1];
     if (cancelInProgress) return ctx.answerCallbackQuery("Previous cancel in progress!");
-    
+
     cancelInProgress = true;
     await ctx.answerCallbackQuery();
     const msg = await ctx.reply(`Starting background cancellation for account ${accId}... ⏳`);
-    
+
     cancelOrdersForAccount(ctx, accId, msg.message_id).finally(() => {
         cancelInProgress = false;
     });
@@ -353,14 +379,14 @@ bot.callbackQuery(/^cancel_acc_(.+)$/, async (ctx) => {
 bot.command('cookie', async (ctx) => {
     const config = loadConfig();
     if (!config.allowed_users.includes(ctx.from.id)) return;
-    
+
     const parts = ctx.message.text.split(' ');
     // /cookie <text> <number>
     if (parts.length < 2) return ctx.reply("Usage: /cookie <text> [number]");
-    
+
     const cookieText = parts[1];
     const number = parts[2];
-    
+
     const data = loadCookies();
     if (number && data.accounts[number]) {
         data.accounts[number] = cookieText;
@@ -377,7 +403,7 @@ bot.command('cookie', async (ctx) => {
 bot.on('message:text', async (ctx) => {
     const userId = ctx.from.id;
     const config = loadConfig();
-    
+
     if (ctx.session.isAuthenticating) {
         if (ctx.message.text === process.env.BOT_PASSWORD) {
             addAllowedUser(userId);
@@ -389,7 +415,7 @@ bot.on('message:text', async (ctx) => {
         }
         return;
     }
-    
+
     if (config.allowed_users.includes(userId)) {
         const text = ctx.message.text.trim();
         if (text.startsWith('$')) {
@@ -405,11 +431,11 @@ bot.on('message:text', async (ctx) => {
 bot.callbackQuery(/^method_(cashapp|stripe)_(.+)$/, async (ctx) => {
     const config = loadConfig();
     if (!config.allowed_users.includes(ctx.from.id)) return ctx.answerCallbackQuery();
-    
+
     const method = ctx.match[1];
     const amountStr = ctx.match[2];
     await ctx.answerCallbackQuery();
-    
+
     const totalAmount = parseFloat(amountStr);
     const finalAmount = (totalAmount / (1 + (FEE / 100))).toFixed(2);
 
@@ -422,23 +448,23 @@ bot.callbackQuery(/^method_(cashapp|stripe)_(.+)$/, async (ctx) => {
         attempts++;
         // Reload cookies from file every attempt to ensure manual updates are picked up
         const currentData = loadCookies();
-        const account = getNextAccount(); 
+        const account = getNextAccount();
         if (!account) return ctx.editMessageText("❌ No accounts configured.");
 
         await ctx.editMessageText(`Generating link (Acc: ${account.id})... ⏳`);
-        
+
         try {
             const data = await generateLink(finalAmount, method, account);
-            
+
             if (data.expired) {
-                await ctx.reply(`❌ Account ${data.accId} cookie is expired, trying next...`);
-                // Continue to next account
+                if (!success) await ctx.reply(`❌ Account ${data.accId} cookie is expired, trying next...`);
             } else if (data.success && data.location) {
                 let paymentLink = data.location;
                 if (!paymentLink.startsWith('http')) paymentLink = 'https://app.ipayhub.net' + paymentLink;
-                
+
                 await ctx.editMessageText(`💳 Link for $${amountStr} (${method}) [Acc: ${account.id}]:\n\n🔗 ${paymentLink}`, { disable_web_page_preview: true });
                 success = true;
+                break;
             } else {
                 await ctx.editMessageText(`❌ Error (Acc: ${account.id}): ${data.error || 'Unknown'}`);
                 return; // Stop on serious errors
